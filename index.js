@@ -1,82 +1,105 @@
-const express = require("express");
-const axios = require("axios");
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-} = require("@whiskeysockets/baileys");
+// index.js
+const express = require('express');
+const { 
+    makeWASocket, 
+    useMultiFileAuthState, 
+    DisconnectReason,
+    fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const pino = require('pino');
+const qrcode = require('qrcode-terminal');
 
+const AUTH_INFO_DIR = './auth';
+let statusLampu = 'OFF'; // status global
+
+// ===== EXPRESS SERVER =====
 const app = express();
-app.use(express.json());
 
-let statusLampu = "OFF";
-
-// ===== SERVER ENDPOINTT =====
-app.get("/", (req, res) => {
-  res.send("Server WA + ESP32 Aktif 🚀");
+app.get('/', (req, res) => {
+    res.send('WA + ESP32 Server Aktif 🚀');
 });
 
-app.get("/status", (req, res) => {
-  res.send(statusLampu);
+app.get('/status', (req, res) => {
+    res.send(statusLampu);
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+    console.log(`Server aktif di port ${PORT}`);
 });
 
 // ===== WHATSAPP BOT =====
-async function startWA() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth");
+async function startBot() {
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_INFO_DIR);
+        const { version } = await fetchLatestBaileysVersion();
 
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
-  });
+        const sock = makeWASocket({
+            version,
+            logger: pino({ level: 'silent' }),
+            auth: state,
+        });
 
-  sock.ev.on("creds.update", saveCreds);
+        // QR Code & koneksi
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
 
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect } = update;
+            if (qr) {
+                console.log('📱 Pindai QR code ini untuk login:');
+                qrcode.generate(qr, { small: true });
+            }
 
-    if (connection === "open") {
-      console.log("WhatsApp Connected ✅");
+            if (connection === 'close') {
+                const shouldReconnect = new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+                if (shouldReconnect) {
+                    console.log('🔄 Koneksi terputus, mencoba reconnect...');
+                    startBot();
+                } else {
+                    console.log('❌ WhatsApp terlogout, hapus folder auth/ untuk login ulang');
+                }
+            } else if (connection === 'open') {
+                const userNumber = sock.user.id.split(':')[0];
+                console.log(`✅ Koneksi WhatsApp Terhubung ke Nomor: ${userNumber}`);
+            }
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        // ===== MESSAGE HANDLER =====
+        sock.ev.on('messages.upsert', async (m) => {
+            const msg = m.messages[0];
+            if (!msg.message || msg.key.fromMe) return;
+
+            const from = msg.key.remoteJid;
+            const body = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
+            const bodyLower = body.toLowerCase();
+
+            // ===== MENU LAMPU =====
+            switch(bodyLower) {
+                case 'kiri':
+                    statusLampu = 'KIRI';
+                    await sock.sendMessage(from, { text: 'Lampu KIRI aktif 🔥' });
+                    break;
+                case 'kanan':
+                    statusLampu = 'KANAN';
+                    await sock.sendMessage(from, { text: 'Lampu KANAN aktif 🔥' });
+                    break;
+                case 'hazard':
+                    statusLampu = 'HAZARD';
+                    await sock.sendMessage(from, { text: 'Lampu HAZARD aktif ⚠️' });
+                    break;
+                case 'off':
+                    statusLampu = 'OFF';
+                    await sock.sendMessage(from, { text: 'Lampu dimatikan ❌' });
+                    break;
+            }
+        });
+
+    } catch(err) {
+        console.error('Error start WA:', err);
     }
-
-    if (connection === "close") {
-      const reason = lastDisconnect?.error?.output?.statusCode;
-      if (reason !== DisconnectReason.loggedOut) {
-        startWA();
-      }
-    }
-  });
-
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-
-    const msg = messages[0];
-    if (!msg.message) return;
-
-    const from = msg.key.remoteJid;
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      "";
-
-    const pesan = text.toLowerCase().trim();
-
-    if (pesan === "kiri") statusLampu = "KIRI";
-    else if (pesan === "kanan") statusLampu = "KANAN";
-    else if (pesan === "hazard") statusLampu = "HAZARD";
-    else if (pesan === "off") statusLampu = "OFF";
-    else return;
-
-    await sock.sendMessage(from, {
-      text: `Lampu sekarang: ${statusLampu}`,
-    });
-
-    console.log("Status berubah:", statusLampu);
-  });
 }
 
-startWA();
+// Jalankan WA bot
+startBot();
