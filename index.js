@@ -11,7 +11,7 @@ app.use(express.json());
 
 let statusLampu = "OFF";
 
-// ===== SERVER ENDPOINT =====
+// ===== SERVER ENDPOINTT =====
 app.get("/", (req, res) => {
   res.send("Server WA + ESP32 Aktif 🚀");
 });
